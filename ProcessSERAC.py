@@ -122,67 +122,20 @@ def find_nearest_2D(X_array, Y_array, coords, n_n = 4):
     return ind_ls, mean_x_err, mean_y_err
 
 
-def find_nearest_withNA(X_array, Y_array, Z_array, coords, k = 10, n_n = 4): # RACMO FDM netcdf file
-    # Sort the biggest kth elements in an array. k should be at least equal to n_n, 
-    # because the netcdf file of FDM contains grids of NaNs
-    # Number of nearest neighbors to be selected
-    ind_ls = []
-    for i in range(len(coords)): # TBM: coords must be of the same length as well
-        ind_fla = np.argpartition((np.square(X_array - float(coords[i][0])) + 
-                                   np.square(Y_array - float(coords[i][1]))).flatten(), tuple(range(0,k)))[:k]
-        
-        ind_near = []
-        c = 0
-        n = 0
-        while n < k:
-            ind = divmod(ind_fla[n], X_array.shape[1])
-            if not np.isnan(Z_array[:, ind[0], ind[1]]).any():
-                ind_near.append(ind)
-                c = c+1
-                if c == n_n:
-                    break # Finish searching after found n_n nearest neighbors without NaNs
-            n = n+1
-            
-        if c < n_n:
-            raise ValueError("Only "+str(c)+" nearest neighbors are selected at the "+str(i)+"th location:\n"+
-                  str(k-c)+" of the "+str(k)+" nearest neighbors contains NaN.\nPlease increase the value of k.")
-        ind_ls.append(np.array(ind_near))
-        
-    mean_x_err, mean_y_err = get_XY_err(X_array, Y_array, ind_ls, coords, dim = 2)
-        
-    return ind_ls, mean_x_err, mean_y_err   
-    
-    
-def extract_FDM_TS(fname, coords, n = 4, useCSV = True, plot_n = 0):
-    if useCSV:
-        FDM_fcsv = pd.read_csv(fname, na_values=-999.0) 
-        time = np.array(FDM_fcsv.columns[4:], dtype = float)
+## Only enable useCSV option????
+def extract_FDM_TS(fname, coords, n = 4, plot_n = 0):
+    FDM_fcsv = pd.read_csv(fname, na_values=-999.0) 
+    time = np.array(FDM_fcsv.columns[4:], dtype = float)
 
-        ind_ls, mean_x_err, mean_y_err = find_nearest_2D(FDM_fcsv['X'].values, FDM_fcsv['Y'].values, coords, n_n = n)
-    else:
-        FDM = xr.open_dataset(fname)
-        time = FDM['time'].values
-        time_decimal = []
-        for t in time:
-            time_decimal.append(year_fraction(pd.Timestamp(t).to_pydatetime()))
-        time = np.array(time_decimal)
-        
-        X, Y = reproj(FDM.lon.values.reshape(-1), FDM.lat.values.reshape(-1), "epsg:4326", "epsg:32624")
-        X = X.reshape(FDM.lon.values.shape)
-        Y = Y.reshape(FDM.lat.values.shape)
-        
-        ind_ls, mean_x_err, mean_y_err = find_nearest_withNA(X, Y, FDM['zs'].values, coords, n_n = n)
+    ind_ls, mean_x_err, mean_y_err = find_nearest_2D(FDM_fcsv['X'].values, FDM_fcsv['Y'].values, coords, n_n = n)
 
     fdm_serac = []
     fdm_serac_std = []
     for i in range(len(ind_ls)):
         h1 = []
         for j in range(len(ind_ls[i])):
-            if useCSV:
-                h1.append(FDM_fcsv.iloc[ind_ls[i][j], 4:])
-            else:
-                h1.append(FDM['zs'].values[:, ind_ls[i][j][0], ind_ls[i][j][1]])
-        fdm_serac.append(h1[0].values) ## nearest neighbor
+            h1.append(FDM_fcsv.iloc[ind_ls[i][j], 4:].values)
+        fdm_serac.append(h1[0]) ## nearest neighbor
         fdm_serac_std.append(np.std(np.array(h1), axis = 0))
         
     ## Example plot surface height change due to FDM at the kth surface patch
@@ -235,7 +188,7 @@ def resample_FDM(time, fdm_serac, fdm_serac_std, df_SERAC): ## temporal resample
 
 class Read:
     
-    def __init__(self, fname = None, skiprows = None, max_col_count = 10):
+    def __init__(self, fname = None, skiprows = None, max_col_count = 10, header_col_count = 10, rename_IC = False):
         self.fname = fname
         
         df = pd.read_table(self.fname, sep = "\s+", skiprows = skiprows, header = None, 
@@ -243,16 +196,17 @@ class Read:
 
         header = df[df[0].astype(str).str.isnumeric()].copy()
         header.iloc[:, 1] = np.array(header.iloc[:, 1].values, dtype = int)
-        header.iloc[:, -1] = np.array(header.iloc[:, -1].values, dtype = int)
+        header = header.drop(header.iloc[:, header_col_count:],axis = 1)
 
-        self.df = df.drop(header.index).reset_index(drop = True).dropna(axis = 1)
-        # df[1] = ['ICESat' if item[1].isnumeric() else item for item in df[1]]
+        self.df = df.drop(header.index).reset_index(drop = True).dropna(axis = 1, how='all')
+        if rename_IC:
+            self.df[0] = ['ICESat' if item[1].isnumeric() else item for item in self.df[0]]
         self.header = header.reset_index(drop = True).dropna(axis = 1)    
         patch_index = np.insert(np.cumsum(self.header[1].values), 0, 0)
         
         SERAC_dic = {}
         for k in range(len(self.header)):
-            SERAC_dic[self.header.iloc[k,0]] = self.df[patch_index[k]:patch_index[k+1]]
+            SERAC_dic[self.header.iloc[k,0]] = self.df[patch_index[k]:patch_index[k+1]].sort_values(1).reset_index(drop=True)
         self.SERAC_dic = SERAC_dic
         
     def return_raw(self): 
@@ -263,10 +217,12 @@ class Read:
         return self.header, self.SERAC_dic
 
     
-    
+
+## To do: change geoid to 3 decimals, lat and lon precision    
 class Partition:
     def __init__(self, header = None, SERAC_dic = None):
         
+        header.iloc[:, -1] = np.array(header.iloc[:, -1].values, dtype = int)
         header['lon'], header['lat'] = reproj(header.iloc[:, 3], header.iloc[:, 4], "epsg:32624", "epsg:4326")
         
         self.header = header
@@ -348,45 +304,93 @@ class Partition:
         
         if plot_code: ## add ways to plot bigger than 1? constrain how many plots can be shown?
             for i in range(len(absh)):
-                if np.any(flags[i]==plot_code):
+                if any(item in plot_code for item in flags[i]):
                     fig = plt.figure(figsize = (15,5))
                     ax1 = fig.add_subplot(1, 1, 1)
                     ax1.scatter(time[i], absh[i], c = 'red')
                     plt.errorbar(time[i], absh[i], yerr = err_relh[i], color='grey', linestyle='')
                     ax1.set_xticks(np.arange(int(time[i][0]), int(time[i][-1]+2), 2))
                     ax1.tick_params(axis='x', rotation=45)
-                    ax1.set_title(header[0][i]+' GEOID height: '+str(np.round(header['geoid'][i], 2)), fontsize = 22)
+                    ax1.set_title(self.header[0][i]+' GEOID height: '+str(np.round(self.header['geoid'][i], 2)), fontsize = 22)
+                    ax1.grid()
                     ax1.set(xlabel=None, ylabel=None)
 
         return flags    
         
-        
-    def partition_FDM(self, FDM_fname, useCSV, n, plot_n):
+    
+    ## Add method = mean/nearest?? save mean_x_err, mean_y_err to txt
+    def extract_FDM(self, fdm_fname, n, plot_n, save_FDM_txt = False, output_FDM = '', output_FDMstd = ''):
         coords = np.array([self.header[3].values, self.header[4].values]).T
-        time, fdm_serac, fdm_serac_std, mean_x_err, mean_y_err = extract_FDM_TS(FDM_fname, coords, 
-                                                                                n = 4, useCSV = useCSV, plot_n = plot_n)
+        time_fdm, fdm_serac, fdm_serac_std, mean_x_err, mean_y_err = extract_FDM_TS(fdm_fname, coords, 
+                                                                                n = 4, plot_n = plot_n)
+        self.mean_x_err = mean_x_err
+        self.mean_y_err = mean_y_err
+        
+        if save_FDM_txt:
+            time_fdm_str = np.insert(np.array(time_fdm, dtype = str), 0, 'ID')
+            with open(output_FDM, 'w', encoding='UTF8') as f:
+                # write the header line
+                f.write("\t".join(str(item) for item in time_fdm_str))
+                f.write("\n")
 
-        time_fdm, time_err, h_fdm, h_fdm_std = resample_FDM(time, fdm_serac, fdm_serac_std, self.SERAC_dic)
+                # write FDM records
+                for i in range(len(fdm_serac)):
+                    fdm_serac_row = np.insert(np.array(np.round(fdm_serac[i], 3), dtype = str), 0, self.header.iloc[i,0])
+                    f.write("\t".join(str(item) for item in fdm_serac_row))
+                    f.write("\n")
+        
+            ## Save FDM standard deviation to text file
+            with open(output_FDMstd, 'w', encoding='UTF8') as f:
+                # write the header line
+                f.write("\t".join(str(item) for item in time_fdm_str))
+                f.write("\n")
+
+                # write FDM standard deviation records
+                for i in range(len(fdm_serac_std)):
+                    fdm_serac_std_row = np.insert(np.array(np.round(fdm_serac_std[i], 3), dtype = str), 0, self.header.iloc[i,0])
+
+                    f.write("\t".join(str(item) for item in fdm_serac_std_row))
+                    f.write("\n")
+            
+        return time_fdm, fdm_serac, fdm_serac_std
+    
+        
+    def partition_FDM(self, time_fdm, fdm_serac, fdm_serac_std):
+        time_fdm_r, time_err, h_fdm, h_fdm_std = resample_FDM(time_fdm, fdm_serac, fdm_serac_std, self.SERAC_dic)
+        t_err_thre = 11/365
         
         ## Get Surface elevation relative to reference elevation (m) (rel_h) 
         rel_h = get_SERAC_column(self.SERAC_dic, 4)
         err_rel_h = get_SERAC_column(self.SERAC_dic, 5)
 
         ## Calculate dynamic ice thickness change and errors
-
         d_h_result = []
         err_d_h = []
+        nan_pads = []
         for j in range(len(rel_h)):
-            d_h_result.append(total2dynamicH_direct(rel_h[j], h_fdm[j]))
-            err_d_h.append(error_prop_add_direct(err_rel_h[j], h_fdm_std[j]))
+            # Only keep FDM within 11 days of SERAC reconstructions
+            t_err_msk = abs(time_err[j])<t_err_thre
+            pads_before = np.where(t_err_msk == 1)[0][0]
+            pads_after = len(t_err_msk) - np.where(t_err_msk == 1)[0][-1] - 1
+            nan_pads.append([pads_before, pads_after])
+            
+            for item in [time_fdm_r, time_err, h_fdm, h_fdm_std]:
+                item[j] = item[j][t_err_msk]
+            rel_h_j = rel_h[j][t_err_msk]
+            err_rel_h_j = err_rel_h[j][t_err_msk]
+            
+            d_h_result.append(np.pad(total2dynamicH_direct(rel_h_j, h_fdm[j]), (pads_before, pads_after), mode='constant', constant_values=-999.))
+            err_d_h.append(np.pad(error_prop_add_direct(err_rel_h_j, h_fdm_std[j]), (pads_before, pads_after), mode='constant', constant_values=-999.))
 
-        self.mean_x_err = mean_x_err
-        self.mean_y_err = mean_y_err
+            for item in [time_fdm_r, time_err, h_fdm, h_fdm_std]:
+                item[j] = np.pad(item[j], (pads_before, pads_after), mode='constant', constant_values=-999.)
+            
         self.time_err = time_err
         self.h_fdm = h_fdm
         self.h_fdm_std = h_fdm_std
         self.d_h_result = d_h_result
         self.err_d_h = err_d_h
+        self.nan_pads = nan_pads
 
         return h_fdm, h_fdm_std, d_h_result, err_d_h
         
@@ -400,6 +404,7 @@ class Partition:
             ## Add height change due to FDM at the closest grid with std from the 4 nearest neighbors, 
             ## and dynamic ice thickness change and formally propagated errors to SERAC data array
             h_fdm_d = np.round(np.array([self.h_fdm[ind], self.h_fdm_std[ind], self.d_h_result[ind], self.err_d_h[ind]]).T, 3)
+            
             d_1patch = np.insert(d_1patch, [d_1patch.shape[1]], h_fdm_d, axis=1)
 
             if add_flag:
